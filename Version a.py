@@ -68,12 +68,14 @@ def split_text_for_tts(text, max_chars=250):
     return fragments
 
 def generate_audio_with_retries(text, api_key, voice_id, stability, similarity, use_speaker_boost, 
-                              fragment_number, model_id="eleven_multilingual_v2"):
+                              fragment_number, retries=2, model_id="eleven_multilingual_v2"):
     """
-    Genera audio usando la API de Eleven Labs optimizado para una sola versión.
+    Genera audio usando la API de Eleven Labs con un solo intento, solo versión 'a'
     """
-    url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
+    # Ya que solo generamos una versión, solo necesitamos un nombre de archivo
+    filename = f"{fragment_number}a.mp3"  # Mantenemos el sufijo 'a' para consistencia
     
+    url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
     headers = {
         "Accept": "audio/mpeg",
         "Content-Type": "application/json",
@@ -90,19 +92,18 @@ def generate_audio_with_retries(text, api_key, voice_id, stability, similarity, 
             "use_speaker_boost": use_speaker_boost
         }
     }
-    
+
     try:
         response = requests.post(url, json=data, headers=headers)
         if response.status_code == 200:
-            filename = f"{fragment_number}.mp3"
+            # Solo generamos la versión 'a'
             return [{'content': response.content, 'filename': filename, 'text': text}]
         else:
-            st.warning(f"Error en la generación: {response.status_code}")
-            st.warning(f"Detalles: {response.text}")
+            st.warning(f"Error en generación: {response.status_code}")
     except Exception as e:
         st.error(f"Error en la solicitud: {str(e)}")
     
-    time.sleep(5.5)
+    time.sleep(5.5)  # Mantenemos la pausa entre intentos
     return []
 
 def get_available_voices(api_key):
@@ -124,47 +125,71 @@ def get_available_voices(api_key):
     except:
         return {}
 
-def create_zip_file(audio_files):
+def create_zip_files_by_version(audio_files):
     """
-    Crea un único archivo ZIP con los audios generados
+    Crea archivos ZIP separados para cada versión (a, b, c)
+    Retorna un diccionario con los contenidos de cada ZIP
     """
-    zip_buffer = io.BytesIO()
-    with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
-        for audio in audio_files:
-            zip_file.writestr(audio['filename'], audio['content'])
-    return zip_buffer.getvalue()
+    files_by_version = {
+        'a': [],
+        'b': [],
+        'c': []
+    }
+    
+    for audio in audio_files:
+        version = audio['filename'][-5]  # Obtiene la letra de la versión
+        files_by_version[version].append(audio)
+    
+    zip_contents = {}
+    for version, files in files_by_version.items():
+        zip_buffer = io.BytesIO()
+        with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+            for audio in files:
+                new_filename = f"{audio['filename'][:-5]}.mp3"
+                zip_file.writestr(new_filename, audio['content'])
+        
+        zip_contents[version] = zip_buffer.getvalue()
+    
+    return zip_contents
 
 def main():
     st.title("🎙️ Generador de Audio con Eleven Labs")
-    st.write("Convierte texto a audio de alta calidad")
+    st.write("Divide tu texto y genera audio de alta calidad con reintentos automáticos")
     
     # Configuración en la barra lateral
     st.sidebar.header("Configuración")
+    
+    st.sidebar.markdown("""
+    ### 🔄 Sistema de reintentos
+    - Cada fragmento se generará 3 veces
+    - Los archivos se nombrarán: 1a, 1b, 1c, 2a, 2b, 2c, etc.
+    - Se pueden descargar las versiones A, B y C por separado
+    """)
     
     api_key = st.sidebar.text_input("API Key de Eleven Labs", type="password")
     
     max_chars = st.sidebar.number_input("Máximo de caracteres por fragmento", 
                                       min_value=100, 
                                       max_value=500, 
-                                      value=220)
+                                      value=250)
     
     model_id = "eleven_multilingual_v2"
     st.sidebar.markdown("""
     **Modelo:** Eleven Multilingual v2
-    - Soporta múltiples idiomas
-    - Optimizado para calidad
+    - Soporta 29 idiomas
+    - Ideal para voiceovers y audiolibros
     """)
     
     stability = st.sidebar.slider("Stability", 
                                 min_value=0.0, 
                                 max_value=1.0, 
-                                value=0.52,
+                                value=0.5,
                                 step=0.01)
     
     similarity = st.sidebar.slider("Similarity", 
                                  min_value=0.0, 
                                  max_value=1.0, 
-                                 value=0.82,
+                                 value=0.75,
                                  step=0.01)
                                  
     use_speaker_boost = st.sidebar.checkbox("Speaker Boost", value=True)
@@ -181,22 +206,23 @@ def main():
     
     text_input = st.text_area("Ingresa tu texto", height=200)
     
-    if st.button("Procesar texto y generar audio"):
+    if st.button("Procesar texto y generar audios"):
         if not text_input or not api_key:
             st.warning("Por favor ingresa el texto y la API key.")
             return
         
         fragments = split_text_for_tts(text_input, max_chars)
-        st.info(f"Se generarán {len(fragments)} fragmentos")
+        st.info(f"Se generarán {len(fragments)} fragmentos, con 3 versiones cada uno (total: {len(fragments) * 3} archivos)")
         
         progress_bar = st.progress(0)
         status_text = st.empty()
         
         all_audio_files = []
-        total_fragments = len(fragments)
+        total_generations = len(fragments) * 3
+        current_progress = 0
         
         for i, fragment in enumerate(fragments, 1):
-            status_text.text(f"Procesando fragmento {i}/{total_fragments}...")
+            status_text.text(f"Generando fragmento {i}/{len(fragments)} (con reintentos)...")
             
             audio_results = generate_audio_with_retries(
                 fragment,
@@ -209,36 +235,62 @@ def main():
             )
             
             all_audio_files.extend(audio_results)
-            progress_bar.progress(i / total_fragments)
+            current_progress += 3
+            progress_bar.progress(current_progress / total_generations)
             
             with st.expander(f"Fragmento {i}"):
                 st.write(fragment)
                 for result in audio_results:
                     st.audio(result['content'], format="audio/mp3")
+                    st.caption(f"Versión: {result['filename']}")
         
-        status_text.text("¡Proceso completado! Preparando archivo ZIP...")
+        status_text.text("¡Proceso completado! Preparando archivos ZIP...")
         
         if all_audio_files:
+            # Guardamos los resultados en el estado de la sesión
             st.session_state.current_generation = {
-                'zip_contents': create_zip_file(all_audio_files),
+                'zip_contents': create_zip_files_by_version(all_audio_files),
                 'timestamp': datetime.now().strftime("%Y%m%d_%H%M%S"),
                 'files_generated': True
             }
     
+    # Mostrar los botones de descarga si hay archivos generados
     if st.session_state.current_generation['files_generated']:
         st.subheader("📥 Descargar archivos generados")
         
+        col1, col2, col3 = st.columns(3)
+        
+        zip_contents = st.session_state.current_generation['zip_contents']
         timestamp = st.session_state.current_generation['timestamp']
         
-        st.download_button(
-            label="⬇️ Descargar todos los audios",
-            data=st.session_state.current_generation['zip_contents'],
-            file_name=f"audios_generados_{timestamp}.zip",
-            mime="application/zip"
-        )
+        with col1:
+            st.download_button(
+                label="⬇️ Descargar versión A",
+                data=zip_contents['a'],
+                file_name=f"audios_versionA_{timestamp}.zip",
+                mime="application/zip",
+                key="download_a"
+            )
         
-        st.success("Los archivos están listos para descargar.")
+        with col2:
+            st.download_button(
+                label="⬇️ Descargar versión B",
+                data=zip_contents['b'],
+                file_name=f"audios_versionB_{timestamp}.zip",
+                mime="application/zip",
+                key="download_b"
+            )
+        
+        with col3:
+            st.download_button(
+                label="⬇️ Descargar versión C",
+                data=zip_contents['c'],
+                file_name=f"audios_versionC_{timestamp}.zip",
+                mime="application/zip",
+                key="download_c"
+            )
+        
+        st.success("Los archivos están listos para descargar. Puedes descargar cada versión por separado.")
 
 if __name__ == "__main__":
-    main()
     main()
